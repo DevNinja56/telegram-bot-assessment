@@ -20,6 +20,7 @@ To run this bot, you need:
   TELEGRAM_BOT_TOKEN=your-telegram-bot-token
   OPENAI_API_KEY=your-openai-api-key
   MONGO_URI=your-mongo-connection-string
+  OPENAI_MAX_TOKENS=150
   ```
 
 ## Setup

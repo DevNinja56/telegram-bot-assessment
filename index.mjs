@@ -1,9 +1,14 @@
-require("dotenv").config();
-const { Telegraf } = require("telegraf");
-const mongoose = require("mongoose");
-const OpenAI = require("openai");
+// Import dependencies
+import * as dotenv from "dotenv";
+import { Telegraf } from "telegraf";
+import mongoose from "mongoose";
+import OpenAI from "openai";
 
-// Set up MongoDB connection
+// Load environment variables
+dotenv.config();
+
+// Connect to MongoDB
+// Connect to MongoDB
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
@@ -14,31 +19,38 @@ const connectDB = async () => {
   }
 };
 
-// Define Conversation schema
-const conversationSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  messages: [
-    {
-      role: { type: String, enum: ["bot", "user"], required: true },
-      content: { type: String, required: true },
-      timestamp: { type: Date, default: Date.now },
-    },
-  ],
-});
+// Define MongoDB Schema and Model
+const defineModels = () => {
+  const conversationSchema = new mongoose.Schema({
+    userId: { type: String, required: true },
+    messages: [
+      {
+        role: { type: String, enum: ["bot", "user"], required: true },
+        content: { type: String, required: true },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
+  });
 
-const Conversation = mongoose.model("Conversation", conversationSchema);
+  return mongoose.model("Conversation", conversationSchema);
+};
 
-// Set up OpenAI API
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const Conversation = defineModels();
 
-// Set up Telegram Bot
+// Initialize OpenAI API
+const initializeOpenAI = () => {
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+};
+
+const openai = initializeOpenAI();
+
+// Initialize Telegram Bot
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
 // User state management
 const userState = {};
-
 const setUserState = (userId) => {
   if (!userState[userId]) {
     userState[userId] = { step: 0, responses: {}, plan: null };
@@ -52,7 +64,7 @@ const askOpenAI = async (prompt) => {
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 150, // Limit the token count for shorter responses
+      max_tokens: parseInt(process.env.OPENAI_MAX_TOKENS) || 150, // Configurable token limit
     });
     return response.choices[0].message.content.trim();
   } catch (error) {
@@ -70,13 +82,7 @@ const generatePlan = async (responses) => {
 
   Please keep the plan concise, no more than 100 words.`;
 
-  try {
-    const plan = await askOpenAI(prompt);
-    return plan;
-  } catch (error) {
-    console.error("Error generating plan:", error);
-    return "I'm sorry, I couldn't generate a plan. Please try again.";
-  }
+  return await askOpenAI(prompt);
 };
 
 // Save conversation to MongoDB
@@ -86,7 +92,6 @@ const saveConversation = async (ctx, state) => {
     content,
   }));
 
-  // Include the generated plan in the conversation
   if (state.plan) {
     messages.push({
       role: "bot",
@@ -94,20 +99,18 @@ const saveConversation = async (ctx, state) => {
     });
   }
 
-  const conversation = new Conversation({
-    userId: ctx.from.id,
-    messages,
-  });
-
   try {
-    await conversation.save();
+    await new Conversation({
+      userId: ctx.from.id,
+      messages,
+    }).save();
     console.log(`Conversation saved for user ${ctx.from.id}`);
   } catch (error) {
     console.error("Error saving conversation:", error);
   }
 };
 
-// Ask questions sequentially
+// Ask predefined questions
 const askQuestions = async (ctx, state) => {
   const predefinedQuestions = [
     "Are you looking for a health insurance plan?",
@@ -121,36 +124,31 @@ const askQuestions = async (ctx, state) => {
     state.responses[`bot_step_${state.step}`] = question;
     await ctx.reply(question);
   } else {
-    // Generate and send the plan
-    const plan = await generatePlan(state.responses);
-    state.plan = plan; // Store the plan in the state
-    await ctx.reply("Thank you for your responses! Here is the plan we created for you:");
-    await ctx.reply(plan);
-
-    // Save the conversation to MongoDB
-    await saveConversation(ctx, state);
-
-    // Reset user state
-    delete userState[ctx.from.id];
+    try {
+      state.plan = await generatePlan(state.responses);
+      await ctx.reply("Thank you for your responses! Here is the plan we created for you:");
+      await ctx.reply(state.plan);
+      await saveConversation(ctx, state);
+      delete userState[ctx.from.id];
+    } catch (error) {
+      console.error("Error generating plan:", error);
+      await ctx.reply("Something went wrong while generating your plan. Please try again later.");
+    }
   }
 };
 
-// Handle messages
+// Handle incoming text messages
 bot.on("text", async (ctx) => {
   try {
     const userId = ctx.from.id;
     const state = setUserState(userId);
 
     if (state.step % 2 !== 0) {
-      // Save user response
       state.responses[`user_step_${state.step}`] = ctx.message.text;
       state.step++;
     }
 
-    // Ask next question or finalize the process
     await askQuestions(ctx, state);
-
-    // Move to the next step
     state.step++;
   } catch (error) {
     console.error("Error handling message:", error);
@@ -158,21 +156,21 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// Start Bot
+// Start bot and MongoDB connection
 const startBot = async () => {
   try {
     await connectDB();
     bot.launch();
     console.log("Bot is running...");
   } catch (error) {
-    console.error("Error starting bot:", error);
-    process.exit(1);
+    if (error.code === 'ECONNRESET') {
+      console.error("Connection reset by peer, retrying...");
+      setTimeout(startBot, 5000); // Retry after 5 seconds
+    } else {
+      console.error("Error starting bot:", error);
+      process.exit(1);
+    }
   }
 };
 
-// Graceful shutdown
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
-
-// Initialize
 startBot();
